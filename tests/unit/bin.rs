@@ -567,3 +567,18 @@ fn guest_mode_recording_conflict_requires_both_settings() {
     assert!(!super::guest_mode_recording_conflict(true, false));
     assert!(super::guest_mode_recording_conflict(true, true));
 }
+
+/// Written by hand in a config file or by a launcher, so the spacing and a
+/// trailing comma are the writer's, and neither may become a host name that
+/// matches a request with an empty `Host`.
+#[test]
+fn the_allowed_hosts_are_a_trimmed_list_without_blanks() {
+    assert!(super::allowed_hosts(&values(&[])).is_empty());
+    assert_eq!(
+        super::allowed_hosts(&values(&[(
+            "CODETRIAL_ALLOWED_HOSTS",
+            " 127.0.0.1:3101 ,, Desktop.Test ,"
+        )])),
+        ["127.0.0.1:3101", "Desktop.Test"]
+    );
+}
