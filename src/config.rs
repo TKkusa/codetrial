@@ -987,6 +987,11 @@ pub fn guest_mode_enabled(value: Option<&str>) -> bool {
     parse_bool(value, DEFAULT_GUEST_MODE_ENABLED)
 }
 
+/// `CODETRIAL_EXIT_WITH_STDIN`: off unless a launcher asks for it.
+pub fn exit_with_stdin(value: Option<&str>) -> bool {
+    parse_bool(value, false)
+}
+
 pub fn gemini_candidate_video_enabled(value: Option<&str>) -> bool {
     parse_bool(value, DEFAULT_GEMINI_CANDIDATE_VIDEO_ENABLED)
 }
