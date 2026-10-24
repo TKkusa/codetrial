@@ -21,6 +21,7 @@ fn the_server_is_started_on_the_data_dir_and_told_the_rest() {
         program: PathBuf::from("codetrial"),
         data_dir: PathBuf::from("/data"),
         addr: "127.0.0.1:3101".to_string(),
+        import_config: None,
     };
     let command = command(&launch);
     let args = command
@@ -52,6 +53,68 @@ fn the_server_is_started_on_the_data_dir_and_told_the_rest() {
     };
     assert_eq!(command.get_envs().count(), 1);
     assert_eq!(env("CODETRIAL_EXIT_WITH_STDIN").as_deref(), Some("1"));
+}
+
+#[test]
+fn a_cli_config_found_is_offered_to_the_server_to_import() {
+    let launch = Launch {
+        program: PathBuf::from("codetrial"),
+        data_dir: PathBuf::from("/data"),
+        addr: "127.0.0.1:3101".to_string(),
+        import_config: Some(PathBuf::from("/checkout/config/codetrial.env.local")),
+    };
+    let args = command(&launch)
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        args[args.len() - 2..],
+        ["--import-config", "/checkout/config/codetrial.env.local"]
+    );
+}
+
+/// A development run starts in `desktop/`, below the checkout's `config/`; the
+/// nearest config wins, and in one folder `config/` comes before a bare file,
+/// as the CLI searches them.
+#[test]
+fn the_cli_config_is_looked_for_from_the_start_folder_upward() {
+    let root = temp_dir("cli-config");
+    let start = root.join("checkout").join("desktop");
+    std::fs::create_dir_all(&start).unwrap();
+    let in_root = root.join("codetrial.env.local");
+    let checkout_bare = root.join("checkout").join("codetrial.env.local");
+    let checkout_config = root
+        .join("checkout")
+        .join("config")
+        .join("codetrial.env.local");
+    std::fs::create_dir_all(checkout_config.parent().unwrap()).unwrap();
+
+    let found = cli_config_near(&start);
+    assert!(
+        !found.as_deref().is_some_and(|path| path.starts_with(&root)),
+        "{found:?} was never written"
+    );
+    std::fs::write(&in_root, "").unwrap();
+    assert_eq!(cli_config_near(&start).as_deref(), Some(in_root.as_path()));
+    std::fs::write(&checkout_bare, "").unwrap();
+    assert_eq!(
+        cli_config_near(&start).as_deref(),
+        Some(checkout_bare.as_path())
+    );
+    std::fs::write(&checkout_config, "").unwrap();
+    assert_eq!(
+        cli_config_near(&start).as_deref(),
+        Some(checkout_config.as_path())
+    );
+    // A folder of that name is not a config.
+    std::fs::remove_file(&checkout_config).unwrap();
+    std::fs::create_dir_all(&checkout_config).unwrap();
+    assert_eq!(
+        cli_config_near(&start).as_deref(),
+        Some(checkout_bare.as_path())
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 // The app waits for this text and nothing else, and it lives in another crate,
@@ -100,6 +163,7 @@ fn launch_of(dir: &Path, program: PathBuf, addr: String) -> Launch {
         program,
         data_dir: dir.to_path_buf(),
         addr,
+        import_config: None,
     }
 }
 

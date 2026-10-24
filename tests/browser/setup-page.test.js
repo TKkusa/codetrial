@@ -23,6 +23,8 @@ let browser = null;
 let server = null;
 let base = "";
 let submissions = [];
+// What /api/setup/offer answers, or null for the 404 of no offer.
+let offered = null;
 
 before(async () => {
   browser = await launchChromium();
@@ -32,6 +34,12 @@ before(async () => {
       if (url.pathname === "/setup") {
         response.setHeader("content-type", "text/html");
         response.end(html);
+        return true;
+      }
+      if (url.pathname === "/api/setup/offer") {
+        response.statusCode = offered ? 200 : 404;
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(offered ?? {}));
         return true;
       }
       if (url.pathname === "/api/setup") {
@@ -297,4 +305,73 @@ test("setup refuses an imported file it cannot read and keeps the fields", async
   );
   assert.equal(await page.locator("#livekitApiKey").inputValue(), "typed");
   assert.equal(await page.locator("#livekitUrl").inputValue(), "");
+});
+
+test("setup offers nothing when the launcher found no config", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  offered = null;
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  const asked = page.waitForResponse("**/api/setup/offer");
+  await page.goto(`${base}/setup`);
+  await asked;
+  assert.equal(await page.locator("#offer").isVisible(), false);
+  assert.equal(await page.locator("#import-status").innerText(), "");
+});
+
+test("setup names an offered config and uses it without the keys", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  submissions = [];
+  offered = {
+    path: "/home/me/checkout/config/codetrial.env.local",
+    livekitEndpoint: "wss://example.livekit.cloud",
+    google: true,
+    note: null,
+  };
+  t.after(() => {
+    offered = null;
+  });
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  await page.locator("#offer").waitFor();
+  assert.equal(
+    await page.locator("#offer-text").innerText(),
+    "Keys found in /home/me/checkout/config/codetrial.env.local: LiveKit " +
+      "wss://example.livekit.cloud, with a Google key.",
+  );
+
+  await page.locator("#use-offer").click();
+  await page.locator("#offer-status.error").waitFor();
+  assert.deepEqual(submissions, [{ useOffer: true }]);
+  assert.equal(
+    await page.locator("#offer-status").innerText(),
+    "Check the LiveKit credentials",
+  );
+  assert.equal(await page.locator("#use-offer").isEnabled(), true);
+  assert.equal(await page.locator("#submit").isEnabled(), true);
+  for (const field of ["#livekitUrl", "#livekitApiKey", "#livekitApiSecret"]) {
+    assert.equal(await page.locator(field).inputValue(), "", field);
+  }
+});
+
+test("setup reports an offered config it cannot use", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  offered = {
+    path: "/home/me/codetrial.env.local",
+    error:
+      "/home/me/codetrial.env.local does not set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET.",
+  };
+  t.after(() => {
+    offered = null;
+  });
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  await page.locator("#import-status.error").waitFor();
+  assert.match(
+    await page.locator("#import-status").innerText(),
+    /^\/home\/me\/codetrial\.env\.local does not set LIVEKIT_URL/,
+  );
+  assert.equal(await page.locator("#offer").isVisible(), false);
 });

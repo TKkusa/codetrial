@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,10 @@ const REASON_LINES: usize = 12;
 
 const SERVER_LOG: &str = "codetrial-server.log";
 
+/// Where the CLI keeps its config, relative to the directory it starts in:
+/// `config/` in a checkout first, then a bare file beside it.
+const CLI_CONFIGS: [&str; 2] = ["config/codetrial.env.local", "codetrial.env.local"];
+
 /// Everything one launch of the server needs, decided by the caller.
 pub struct Launch {
     pub program: PathBuf,
@@ -32,6 +36,21 @@ pub struct Launch {
     /// `127.0.0.1:PORT`. Also the only `Host` the server will answer, so it has
     /// to be the exact spelling the window loads.
     pub addr: String,
+    /// A CLI config whose keys Setup offers to use on a first launch. The
+    /// server decides what is offered and what using it writes.
+    pub import_config: Option<PathBuf>,
+}
+
+/// The CLI config nearest `start`: the CLI's own two places in `start`, then in
+/// each folder above it. Upward because a checkout's development run starts in
+/// `desktop/`, one level below the `config/` the CLI wrote; an app opened from
+/// the Dock, Finder or the Start menu starts where nothing is found, and Setup
+/// asks as it always has.
+pub fn cli_config_near(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .flat_map(|dir| CLI_CONFIGS.map(|name| dir.join(name)))
+        .find(|path| path.is_file())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -84,7 +103,11 @@ fn command(launch: &Launch) -> Command {
         .arg("--web-addr")
         .arg(&launch.addr)
         .arg("--allowed-hosts")
-        .arg(&launch.addr)
+        .arg(&launch.addr);
+    if let Some(path) = &launch.import_config {
+        command.arg("--import-config").arg(path);
+    }
+    command
         // Not for finding the config, which `--data-dir` already decides, but
         // for a relative path written into it, such as `CODETRIAL_DB_PATH`: the
         // data folder is the one place it can sensibly mean.

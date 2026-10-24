@@ -30,6 +30,13 @@ use crate::runtime::bootstrap;
 /// rest of the path rules live there and a second answer here could disagree
 /// with the search the next launch performs.
 ///
+/// `offer` is a config a launcher found, such as the CLI's, whose keys the
+/// page offers to use. Only a summary of it reaches the page, the LiveKit host
+/// and whether a Google key is there: any account on the machine can reach this
+/// loopback port while Setup serves, and the file's own permissions may keep
+/// some of them out of it. Using it is a submission the server reads the file
+/// for.
+///
 /// No `/healthz`. Nothing polls it here any more, and the full app routes it,
 /// so its absence is the readiness answer a probe wants: a container
 /// healthcheck against a process that has no config and is serving a
@@ -40,12 +47,26 @@ pub fn setup_service(
     production: bool,
     port: u16,
     config_path: PathBuf,
+    offer: Option<PathBuf>,
 ) -> Router {
+    let summarized = offer.clone();
     Router::new()
         .route("/", get(setup_page))
         .route(
+            "/api/setup/offer",
+            get(move || async move { offer_summary(summarized.as_deref()) }),
+        )
+        .route(
             "/api/setup",
-            post(move |body| submit_setup(body, ready.clone(), production, config_path.clone())),
+            post(move |body| {
+                submit_setup(
+                    body,
+                    ready.clone(),
+                    production,
+                    config_path.clone(),
+                    offer.clone(),
+                )
+            }),
         )
         .layer(middleware::from_fn(
             move |request: Request, next: Next| async move {
@@ -258,9 +279,19 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   .import-row small { flex: 1 1 14rem; margin-top: 0; }
   /* The button opens it; the rule for every input above would show it. */
   .import-row input[type="file"] { display: none; }
-  #import-status { flex-basis: 100%; }
-  #import-status.error { color: var(--critical); }
-  #import-status.ok { color: var(--good); }
+  .offer-row:not([hidden]) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--hairline);
+  }
+  #offer-text { flex: 1 1 14rem; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+  #import-status, #offer-status { flex-basis: 100%; margin-top: 0; }
+  #import-status.error, #offer-status.error { color: var(--critical); }
+  #import-status.ok, #offer-status.ok { color: var(--good); }
   button:disabled { cursor: not-allowed; opacity: 0.6; }
   #status { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
   #status.error { color: var(--critical); }
@@ -287,6 +318,11 @@ const SETUP_PAGE: &str = r#"<!doctype html>
     <p class="lead">Connect your services to start practicing live technical interviews.</p>
   </section>
   <form id="setup-form">
+    <div id="offer" class="offer-row" hidden>
+      <p id="offer-text"></p>
+      <button id="use-offer" type="button">Use these keys</button>
+      <small id="offer-status" role="status" aria-live="polite"></small>
+    </div>
     <div class="import-row">
       <button id="import" class="secondary" type="button">Import from a config file</button>
       <input id="import-file" type="file" hidden>
@@ -336,6 +372,10 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   const importButton = document.getElementById('import');
   const importFile = document.getElementById('import-file');
   const importStatus = document.getElementById('import-status');
+  const offer = document.getElementById('offer');
+  const offerText = document.getElementById('offer-text');
+  const useOffer = document.getElementById('use-offer');
+  const offerStatus = document.getElementById('offer-status');
 
   // The fields a config file can fill, by the key the file spells them with.
   const IMPORTED = {
@@ -425,16 +465,18 @@ const SETUP_PAGE: &str = r#"<!doctype html>
     location.reload();
   }
 
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
+  // Both ways to save go through here: the form's fields, or `{ useOffer: true }`,
+  // which the server answers from the offered config without the keys passing
+  // through this page. `line` is the status next to whichever was pressed.
+  async function save(data, line) {
     // A second submission would reach a config file the first one has already
     // written, and the write refuses to overwrite: the double-click would report
     // a failure over a setup that worked. Re-enabled only where the form is
     // still the way forward, which a successful submission is not.
     submit.disabled = true;
-    status.className = '';
-    status.textContent = 'Checking credentials…';
-    const data = Object.fromEntries(new FormData(form).entries());
+    useOffer.disabled = true;
+    line.className = '';
+    line.textContent = 'Checking credentials…';
     let response;
     try {
       response = await fetch('/api/setup', {
@@ -443,22 +485,52 @@ const SETUP_PAGE: &str = r#"<!doctype html>
         body: JSON.stringify(data),
       });
     } catch (error) {
-      status.className = 'error';
-      status.textContent = 'Request failed: ' + error;
+      line.className = 'error';
+      line.textContent = 'Request failed: ' + error;
       submit.disabled = false;
+      useOffer.disabled = false;
       return;
     }
     const body = await response.json().catch(() => ({}));
     if (response.ok) {
-      status.className = 'ok';
-      status.textContent = 'Saved. Starting codetrial…';
+      line.className = 'ok';
+      line.textContent = 'Saved. Starting codetrial…';
       waitForRestart();
     } else {
-      status.className = 'error';
-      status.textContent = body.error || ('Request failed: ' + response.status);
+      line.className = 'error';
+      line.textContent = body.error || ('Request failed: ' + response.status);
       submit.disabled = false;
+      useOffer.disabled = false;
     }
+  }
+
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    save(Object.fromEntries(new FormData(form).entries()), status);
   });
+  useOffer.addEventListener('click', () => save({ useOffer: true }, offerStatus));
+
+  // A config the launcher found, such as the CLI's: named here with its LiveKit
+  // host so the person can tell whose it is before using it. A 404 is no offer.
+  (async () => {
+    let response;
+    try {
+      response = await fetch('/api/setup/offer', { cache: 'no-store' });
+    } catch (error) {
+      return;
+    }
+    if (!response.ok) return;
+    const found = await response.json().catch(() => null);
+    if (!found) return;
+    if (found.error) {
+      showImport('error', found.error);
+      return;
+    }
+    offerText.textContent = 'Keys found in ' + found.path + ': LiveKit ' + found.livekitEndpoint +
+      (found.google ? ', with a Google key.' : ', without a Google key.') +
+      (found.note ? ' ' + found.note : '');
+    offer.hidden = false;
+  })();
 </script>
 </body>
 </html>
@@ -776,12 +848,115 @@ fn write_config_file(path: &Path, contents: &str) -> Option<Response> {
 }
 
 /// One submission: checked, probed, written, and the app let out behind it.
+/// The keys in an offered config, as the form would submit them, with what of
+/// the LiveKit URL the page may show and a note for it.
+///
+/// Read the way the server reads any config, then cut down to what the form
+/// takes, so using it is a submission like a typed one and is checked the
+/// same way. The form takes one Google key, so a `GOOGLE_API_KEYS` list, which
+/// outranks `GOOGLE_API_KEY` as it does when the server reads the file, gives
+/// its first, as importing the file into the form does.
+fn read_offer(path: &Path) -> Result<(Value, String, Option<String>), String> {
+    let shown = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|error| format!("{shown}: {error}"))?;
+
+    // By number, never by its text: this reaches the page, which any account on
+    // the machine can ask for, and a malformed line can hold a secret.
+    let file = crate::config::parse_config(&text)
+        .map_err(|number| format!("{shown}: line {number} is not KEY=value"))?;
+    let mut values = std::collections::BTreeMap::new();
+    crate::config::apply_config_file(&mut values, file);
+    let value = |key: &str| values.get(key).map_or("", |value| value.trim());
+    if ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"]
+        .iter()
+        .any(|key| value(key).is_empty())
+    {
+        return Err(format!(
+            "{shown} does not set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET."
+        ));
+    }
+
+    // Validated before anything of it is shown, by a check whose messages never
+    // name the URL, and then shown as its scheme and host alone: the user
+    // information and the query are where a URL carries a credential.
+    let url = value("LIVEKIT_URL");
+    crate::config::validate_livekit_url(url, false).map_err(|error| format!("{shown}: {error}"))?;
+    let endpoint = format!(
+        "{}{}",
+        crate::config::livekit_scheme(url).map_or("", |(scheme, _, _)| scheme),
+        crate::config::livekit_authority(url)
+    );
+    let rotation = value("GOOGLE_API_KEYS")
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    let note = (rotation.len() > 1).then(|| {
+        format!(
+            "GOOGLE_API_KEYS lists {} keys; Setup saves the first, and the rest can be added \
+             to the saved config.",
+            rotation.len()
+        )
+    });
+    let submission = json!({
+        "livekitUrl": value("LIVEKIT_URL"),
+        "livekitApiKey": value("LIVEKIT_API_KEY"),
+        "livekitApiSecret": value("LIVEKIT_API_SECRET"),
+        "googleApiKey": rotation.first().copied().unwrap_or(value("GOOGLE_API_KEY")),
+    });
+    Ok((submission, endpoint, note))
+}
+
+/// What the page shows of an offered config: its path, its LiveKit scheme and
+/// host and whether it holds a Google key, or why it cannot be used. Never a
+/// key.
+fn offer_summary(offer: Option<&Path>) -> Response {
+    let Some(path) = offer else {
+        return super::json_response(StatusCode::NOT_FOUND, json!({}));
+    };
+    let path_shown = path.display().to_string();
+    match read_offer(path) {
+        Ok((submission, endpoint, note)) => super::json_response(
+            StatusCode::OK,
+            json!({
+                "path": path_shown,
+                "livekitEndpoint": endpoint,
+                "google": submission["googleApiKey"].as_str().is_some_and(|key| !key.is_empty()),
+                "note": note,
+            }),
+        ),
+        Err(error) => super::json_response(
+            StatusCode::OK,
+            json!({ "path": path_shown, "error": error }),
+        ),
+    }
+}
+
 async fn submit_setup(
     Json(submission): Json<Value>,
     ready: Arc<Notify>,
     production: bool,
     path: PathBuf,
+    offer: Option<PathBuf>,
 ) -> Response {
+    // Using the offered config is a submission the server fills in itself, so
+    // the keys never pass through the page.
+    let submission = if submission.get("useOffer") == Some(&Value::Bool(true)) {
+        let Some(offer) = offer else {
+            return super::json_response(
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "no config was offered to use" }),
+            );
+        };
+        match read_offer(&offer) {
+            Ok((submission, _, _)) => submission,
+            Err(error) => {
+                return super::json_response(StatusCode::BAD_REQUEST, json!({ "error": error }));
+            }
+        }
+    } else {
+        submission
+    };
     let fields = match validated_fields(&submission) {
         Ok(fields) => fields,
         Err(error) => {

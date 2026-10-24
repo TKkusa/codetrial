@@ -286,6 +286,9 @@ fn launch(app: &AppHandle) {
             program: server::program_path()?,
             data_dir,
             addr: SERVER_ADDR.to_string(),
+            import_config: std::env::current_dir()
+                .ok()
+                .and_then(|dir| server::cli_config_near(&dir)),
         })
     })();
     let launch = match prepared {

@@ -29,6 +29,7 @@ const SESSION_SECRET_FILE: &str = "session-secret";
 struct CliOptions {
     config_path: Option<String>,
     data_dir: Option<PathBuf>,
+    import_config: Option<PathBuf>,
     web_addr: Option<String>,
     web_dir: Option<String>,
     allowed_hosts: Option<String>,
@@ -208,6 +209,7 @@ fn parse_agent_args(args: &[String]) -> Result<(Vec<String>, CliOptions), String
         match flag {
             "--config" => options.config_path = Some(value),
             "--data-dir" => options.data_dir = Some(PathBuf::from(value)),
+            "--import-config" => options.import_config = Some(PathBuf::from(value)),
             "--web-addr" => options.web_addr = Some(value),
             "--allowed-hosts" => options.allowed_hosts = Some(value),
             "--web-dir" => options.web_dir = Some(value),
@@ -236,6 +238,15 @@ fn parse_agent_args(args: &[String]) -> Result<(Vec<String>, CliOptions), String
                 .to_string(),
         );
     }
+
+    // It is offered on a data folder's first Setup page, and without a data
+    // folder the CLI searches for the file itself.
+    if options.import_config.is_some() && options.data_dir.is_none() {
+        return Err(
+            "--import-config needs --data-dir: it is offered on a data folder's Setup page"
+                .to_string(),
+        );
+    }
     Ok((positionals, options))
 }
 
@@ -257,7 +268,7 @@ fn print_help(usage: Option<&str>) {
         }
     }
     println!(
-        "\nOptions:\n  --config PATH        Use PATH instead of config/codetrial.env.local\n  --data-dir DIR       Keep the config, accounts and error log in DIR only\n  --web-addr ADDR      Listen on ADDR\n  --allowed-hosts LIST Answer only these comma-separated Host values\n  --web-dir PATH       Serve files from PATH\n  --room-prefix PREFIX Prefix generated room names\n  --duration-min MIN   Set the interview duration\n  -h, --help           Show this help\n  -V, --version        Show the package version and build commit\n\nEvery option also takes `--flag=value`, which is the only way to pass a value\nthat starts with a dash. `--` ends the options."
+        "\nOptions:\n  --config PATH        Use PATH instead of config/codetrial.env.local\n  --data-dir DIR       Keep the config, accounts and error log in DIR only\n  --import-config PATH Offer the Setup keys in PATH on DIR's Setup page\n  --web-addr ADDR      Listen on ADDR\n  --allowed-hosts LIST Answer only these comma-separated Host values\n  --web-dir PATH       Serve files from PATH\n  --room-prefix PREFIX Prefix generated room names\n  --duration-min MIN   Set the interview duration\n  -h, --help           Show this help\n  -V, --version        Show the package version and build commit\n\nEvery option also takes `--flag=value`, which is the only way to pass a value\nthat starts with a dash. `--` ends the options."
     );
 }
 
@@ -600,6 +611,7 @@ fn serve_setup(
                 is_production(values),
                 bound.port(),
                 cold_start_config_path(options),
+                options.import_config.clone(),
             );
             axum::serve(listener, service)
                 .with_graceful_shutdown(async move { ready.notified().await })

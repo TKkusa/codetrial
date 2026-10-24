@@ -2780,6 +2780,210 @@ fn a_first_data_dir_launch_writes_the_exported_setup_keys() {
     assert_eq!(mode, 0o600, "{mode:o}");
 }
 
+/// A first `--data-dir` launch from a temporary home, with `--import-config`
+/// naming a file that holds `from` and `env` exported: the address, the
+/// server, the data folder, and the home to remove afterwards.
+fn launch_offering(
+    label: &str,
+    from: &str,
+    env: &[(&str, &str)],
+) -> (String, ServerProcess, PathBuf, PathBuf) {
+    let home = exe_temp_path(&format!("{label}-exe"));
+    let data = temp_path(&format!("{label}-data"));
+    std::fs::create_dir_all(&home).unwrap();
+    let exe = binary_beside(&home);
+    let offered = home.join("cli.env");
+    std::fs::write(&offered, from).unwrap();
+
+    let data_arg = data.to_str().unwrap().to_string();
+    let offer_arg = offered.to_str().unwrap().to_string();
+    let (addr, server) = spawn_server(|addr| {
+        let mut command = Command::new(&exe);
+        scrubbed(&mut command)
+            .args(["web", "--web-addr", addr, "--data-dir", &data_arg])
+            .args(["--import-config", &offer_arg])
+            .current_dir(&home)
+            .envs(env.iter().copied())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    });
+    (addr, server, data, home)
+}
+
+fn get(addr: &str, path: &str) -> String {
+    http_request(
+        addr,
+        &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+}
+
+fn post_setup(addr: &str, body: &str) -> String {
+    http_request(
+        addr,
+        &format!(
+            "POST /api/setup HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+/// A file a launcher came across is not trusted on its own: the first launch
+/// still serves Setup and writes nothing, and the page is told which file and
+/// which LiveKit project, never a key, since any account on the machine can
+/// reach the port while Setup serves.
+#[test]
+fn a_first_data_dir_launch_offers_the_config_it_is_pointed_at() {
+    let (addr, server, data, home) = launch_offering(
+        "data-dir-offer",
+        "LIVEKIT_URL=wss://example.livekit.cloud\nLIVEKIT_API_KEY=the-api-key\n\
+         LIVEKIT_API_SECRET=the-api-secret\nGOOGLE_API_KEY=the-google-key\n",
+        &[],
+    );
+    let page = get(&addr, "/");
+    let offer = get(&addr, "/api/setup/offer");
+    let written = data.join("codetrial.env.local").exists();
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&data);
+
+    assert!(
+        page.contains(r#"name="livekitUrl""#),
+        "Setup was not served: {page}"
+    );
+    assert!(!written, "an offered config was written without being used");
+    assert!(offer.starts_with("HTTP/1.1 200 OK"), "{offer}");
+    assert!(
+        offer.contains(r#""livekitEndpoint":"wss://example.livekit.cloud""#),
+        "{offer}"
+    );
+    assert!(offer.contains(r#""google":true"#), "{offer}");
+    assert!(offer.contains("cli.env"), "{offer}");
+    for key in ["the-api-key", "the-api-secret", "the-google-key"] {
+        assert!(!offer.contains(key), "{key} reached the page: {offer}");
+    }
+}
+
+/// Using the offer is a submission the server fills from the file and checks
+/// like a typed one, and it writes Setup's keys and nothing else of the file,
+/// so a CLI deployment's database path or room prefix stays the CLI's.
+#[test]
+fn using_the_offered_config_writes_its_setup_keys() {
+    let livekit_addr = spawn_livekit_room_service("key", "secret");
+    let livekit_url = format!("http://{livekit_addr}");
+    let (addr, server, data, home) = launch_offering(
+        "data-dir-offer-use",
+        &format!(
+            "# written by the CLI\nLIVEKIT_URL=\"{livekit_url}\"\nLIVEKIT_API_KEY=key\n\
+             LIVEKIT_API_SECRET='secret'\nCODETRIAL_ROOM_PREFIX=from-the-cli\n\
+             CODETRIAL_DB_PATH=/elsewhere/codetrial.db\n"
+        ),
+        &[],
+    );
+    let response = post_setup(&addr, r#"{"useOffer":true}"#);
+    let written = std::fs::read_to_string(data.join("codetrial.env.local")).unwrap_or_default();
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(data.join("codetrial.env.local"))
+            .map(|meta| meta.permissions().mode() & 0o777)
+            .unwrap_or(0)
+    };
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&data);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_eq!(
+        written,
+        format!("LIVEKIT_URL={livekit_url}\nLIVEKIT_API_KEY=key\nLIVEKIT_API_SECRET=secret\n")
+    );
+    #[cfg(unix)]
+    assert_eq!(mode, 0o600, "{mode:o}");
+}
+
+/// Exported keys are this launch's own choice, so they are written and Setup
+/// is skipped whatever file a launcher offers.
+#[test]
+fn exported_setup_keys_skip_setup_whatever_is_offered() {
+    let livekit_addr = spawn_livekit_room_service("key", "secret");
+    let livekit_url = format!("http://{livekit_addr}");
+    let (addr, server, data, home) = launch_offering(
+        "data-dir-offer-exported",
+        "LIVEKIT_URL=wss://elsewhere.livekit.cloud\nLIVEKIT_API_KEY=other\n\
+         LIVEKIT_API_SECRET=other\n",
+        &[
+            ("LIVEKIT_URL", &livekit_url),
+            ("LIVEKIT_API_KEY", "key"),
+            ("LIVEKIT_API_SECRET", "secret"),
+        ],
+    );
+    let page = get(&addr, "/");
+    let written = std::fs::read_to_string(data.join("codetrial.env.local")).unwrap_or_default();
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&data);
+
+    assert!(
+        !page.contains(r#"name="livekitUrl""#),
+        "Setup was served: {page}"
+    );
+    assert_eq!(
+        written,
+        format!("LIVEKIT_URL={livekit_url}\nLIVEKIT_API_KEY=key\nLIVEKIT_API_SECRET=secret\n")
+    );
+}
+
+/// An offered file that cannot be used says why, by path, in place of the
+/// offer, and using it anyway is refused with the same reason.
+#[test]
+fn an_unusable_offered_config_is_reported_not_used() {
+    let (addr, server, data, home) = launch_offering(
+        "data-dir-offer-partial",
+        "LIVEKIT_URL=wss://example.livekit.cloud\n",
+        &[],
+    );
+    let offer = get(&addr, "/api/setup/offer");
+    let response = post_setup(&addr, r#"{"useOffer":true}"#);
+    let written = data.join("codetrial.env.local").exists();
+    drop(server);
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&data);
+
+    let reason = "does not set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET";
+    assert!(offer.contains(reason), "{offer}");
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(response.contains(reason), "{response}");
+    assert!(!written);
+}
+
+/// Without `--import-config` there is nothing to use, and no offer to show.
+#[test]
+fn setup_without_an_offer_refuses_to_use_one() {
+    let dir = exe_temp_path("setup-no-offer");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = binary_beside(&dir);
+    let (addr, server) = spawn_cold_start(&exe, &dir, &[]);
+    let offer = get(&addr, "/api/setup/offer");
+    let response = post_setup(&addr, r#"{"useOffer":true}"#);
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(offer.starts_with("HTTP/1.1 404"), "{offer}");
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+    assert!(response.contains("no config was offered"), "{response}");
+}
+
+#[test]
+fn binary_refuses_an_import_config_without_a_data_dir() {
+    let (code, _, stderr) = run_cli_args(&["web", "--import-config", "cli.env"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("--import-config needs --data-dir"),
+        "{stderr}"
+    );
+}
+
 /// The failure note a double-clicked binary leaves beside itself goes in the
 /// data directory instead: an installed app's executable folder is read-only
 /// or inside a bundle.
