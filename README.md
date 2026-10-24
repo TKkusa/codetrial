@@ -90,8 +90,9 @@ file. Extra `codetrial.env.*` files in the same directory are optional providers
 used for pooling.
 
 If `web` mode finds no config file at all, it serves a Setup page and prints the
-URL to open, so steps 2 and 3 above can be skipped: fill in your keys there and
-it writes `config/codetrial.env.local` for you. That page serves on a loopback
+URL to open, so steps 2 and 3 above can be skipped: fill in your keys there, or
+import them from a config file saved earlier, and it writes
+`config/codetrial.env.local` for you. That page serves on a loopback
 address only and refuses any other, so writing the file yourself is the way to
 deploy for other people. See [docs/install.md](docs/install.md).
 

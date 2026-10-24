@@ -162,3 +162,139 @@ test("setup validates required fields and preserves retry after server error", a
     },
   ]);
 });
+
+const configFile = (name, text) => ({
+  name,
+  mimeType: "text/plain",
+  buffer: Buffer.from(text),
+});
+
+test("setup fills its fields from a chosen config file without sending it", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  submissions = [];
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  assert.notEqual(
+    await page
+      .locator("#import-status")
+      .evaluate((element) => getComputedStyle(element).display),
+    "none",
+    "the import status region is present before its first update",
+  );
+  assert.equal(
+    await page.locator("#import-file").isVisible(),
+    false,
+    "the button stands in for the file input",
+  );
+
+  // What read_config_file accepts: comments, blank lines, spaces around the
+  // equals sign, quotes at either end, and keys Setup does not take.
+  await page
+    .locator("#import-file")
+    .setInputFiles(
+      configFile(
+        "codetrial.env.local",
+        [
+          "# saved by the CLI",
+          "",
+          'LIVEKIT_URL = "wss://example.livekit.cloud"',
+          "LIVEKIT_API_KEY=key",
+          "LIVEKIT_API_SECRET='secret'",
+          "GOOGLE_API_KEY=google",
+          "CODETRIAL_DB_PATH=/elsewhere/codetrial.db",
+        ].join("\r\n"),
+      ),
+    );
+  await page.locator("#import-status.ok").waitFor();
+  assert.match(
+    await page.locator("#import-status").innerText(),
+    /^Filled from codetrial\.env\.local\./,
+  );
+  assert.equal(submissions.length, 0, "importing sends nothing");
+  for (const [field, value] of [
+    ["#livekitUrl", "wss://example.livekit.cloud"],
+    ["#livekitApiKey", "key"],
+    ["#livekitApiSecret", "secret"],
+    ["#googleApiKey", "google"],
+  ]) {
+    assert.equal(await page.locator(field).inputValue(), value, field);
+  }
+
+  await page.locator("#submit").click();
+  await page.locator("#status.error").waitFor();
+  assert.deepEqual(submissions, [
+    {
+      livekitUrl: "wss://example.livekit.cloud",
+      livekitApiKey: "key",
+      livekitApiSecret: "secret",
+      googleApiKey: "google",
+    },
+  ]);
+});
+
+test("setup takes the first key of an imported rotation list and says so", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  await page
+    .locator("#import-file")
+    .setInputFiles(
+      configFile(
+        "rotation.env",
+        [
+          "LIVEKIT_URL=wss://example.livekit.cloud",
+          "LIVEKIT_API_KEY=key",
+          "LIVEKIT_API_SECRET=secret",
+          "GOOGLE_API_KEY=single",
+          "GOOGLE_API_KEYS= first , second ",
+        ].join("\n"),
+      ),
+    );
+  await page.locator("#import-status.ok").waitFor();
+  assert.equal(await page.locator("#googleApiKey").inputValue(), "first");
+  assert.match(
+    await page.locator("#import-status").innerText(),
+    /GOOGLE_API_KEYS lists 2 keys; Setup saves the first/,
+  );
+});
+
+test("setup refuses an imported file it cannot read and keeps the fields", async (t) => {
+  if (!browser) return t.skip("playwright chromium unavailable");
+  const page = await browser.newPage();
+  t.after(() => page.close());
+  await page.goto(`${base}/setup`);
+  await page.locator("#livekitApiKey").fill("typed");
+
+  await page
+    .locator("#import-file")
+    .setInputFiles(
+      configFile(
+        "broken.env",
+        "LIVEKIT_URL=wss://example.livekit.cloud\nnot a setting\n",
+      ),
+    );
+  await page.locator("#import-status.error").waitFor();
+  assert.equal(
+    await page.locator("#import-status").innerText(),
+    "broken.env: not a KEY=value line: not a setting",
+  );
+  assert.equal(await page.locator("#livekitApiKey").inputValue(), "typed");
+
+  await page
+    .locator("#import-file")
+    .setInputFiles(
+      configFile("partial.env", "LIVEKIT_URL=wss://example.livekit.cloud\n"),
+    );
+  // The status already shows the last refusal, so wait for this one.
+  await page
+    .locator("#import-status.error", { hasText: "partial.env" })
+    .waitFor();
+  assert.match(
+    await page.locator("#import-status").innerText(),
+    /^partial\.env does not set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET\.$/,
+  );
+  assert.equal(await page.locator("#livekitApiKey").inputValue(), "typed");
+  assert.equal(await page.locator("#livekitUrl").inputValue(), "");
+});

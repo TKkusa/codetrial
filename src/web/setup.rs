@@ -244,6 +244,23 @@ const SETUP_PAGE: &str = r#"<!doctype html>
     transition: background 120ms ease;
   }
   button:not(:disabled):hover { background: var(--accent-deep); }
+  button.secondary { background: transparent; color: var(--accent-ink); }
+  button.secondary:not(:disabled):hover { background: var(--practice-tint); }
+  .import-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .import-row small { flex: 1 1 14rem; margin-top: 0; }
+  /* The button opens it; the rule for every input above would show it. */
+  .import-row input[type="file"] { display: none; }
+  #import-status { flex-basis: 100%; }
+  #import-status.error { color: var(--critical); }
+  #import-status.ok { color: var(--good); }
   button:disabled { cursor: not-allowed; opacity: 0.6; }
   #status { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
   #status.error { color: var(--critical); }
@@ -270,6 +287,12 @@ const SETUP_PAGE: &str = r#"<!doctype html>
     <p class="lead">Connect your services to start practicing live technical interviews.</p>
   </section>
   <form id="setup-form">
+    <div class="import-row">
+      <button id="import" class="secondary" type="button">Import from a config file</button>
+      <input id="import-file" type="file" hidden>
+      <small>Fills the fields below from a codetrial.env.local saved earlier. Nothing is sent until you save.</small>
+      <small id="import-status" role="status" aria-live="polite"></small>
+    </div>
     <fieldset>
       <legend>LiveKit credentials <span class="requirement">Required</span></legend>
       <p class="group-note">Use the URL and keys from the same LiveKit project.</p>
@@ -310,6 +333,80 @@ const SETUP_PAGE: &str = r#"<!doctype html>
   const form = document.getElementById('setup-form');
   const status = document.getElementById('status');
   const submit = document.getElementById('submit');
+  const importButton = document.getElementById('import');
+  const importFile = document.getElementById('import-file');
+  const importStatus = document.getElementById('import-status');
+
+  // The fields a config file can fill, by the key the file spells them with.
+  const IMPORTED = {
+    LIVEKIT_URL: 'livekitUrl',
+    LIVEKIT_API_KEY: 'livekitApiKey',
+    LIVEKIT_API_SECRET: 'livekitApiSecret',
+    GOOGLE_API_KEY: 'googleApiKey',
+  };
+
+  // The rules of read_config_file in src/config.rs, so a file the server reads
+  // fills the form with what the server would read from it: blank lines and #
+  // comments skipped, every other line KEY=value, both sides trimmed, and a
+  // quote stripped from either end of the value. A line that is not KEY=value
+  // is refused, as the server refuses it, rather than skipped.
+  function parseConfig(text) {
+    const values = {};
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed === '' || trimmed.startsWith('#')) continue;
+      const equals = trimmed.indexOf('=');
+      if (equals < 0) throw new Error('not a KEY=value line: ' + trimmed);
+      values[trimmed.slice(0, equals).trim()] = trimmed
+        .slice(equals + 1)
+        .trim()
+        .replace(/^"+|"+$/g, '')
+        .replace(/^'+|'+$/g, '');
+    }
+    return values;
+  }
+
+  function showImport(className, text) {
+    importStatus.className = className;
+    importStatus.textContent = text;
+  }
+
+  importButton.addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files[0];
+    // Cleared so that choosing the same file again, after editing it, reads it
+    // again instead of firing no change at all.
+    importFile.value = '';
+    if (!file) return;
+    let values;
+    try {
+      values = parseConfig(await file.text());
+    } catch (error) {
+      showImport('error', file.name + ': ' + error.message);
+      return;
+    }
+    if (!['LIVEKIT_URL', 'LIVEKIT_API_KEY', 'LIVEKIT_API_SECRET'].every((key) => values[key])) {
+      showImport('error', file.name + ' does not set LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET.');
+      return;
+    }
+
+    // GOOGLE_API_KEYS outranks GOOGLE_API_KEY, as it does when the server reads
+    // the file. The form saves one key, so a rotation list gives its first and
+    // says so; the rest can be added to the saved config later.
+    let note = '';
+    const rotation = (values.GOOGLE_API_KEYS || '').split(',').map((key) => key.trim()).filter(Boolean);
+    if (rotation.length > 0) {
+      values.GOOGLE_API_KEY = rotation[0];
+      if (rotation.length > 1) {
+        note = ' GOOGLE_API_KEYS lists ' + rotation.length +
+          ' keys; Setup saves the first, and the rest can be added to the saved config.';
+      }
+    }
+    for (const [key, name] of Object.entries(IMPORTED)) {
+      form.elements[name].value = values[key] || '';
+    }
+    showImport('ok', 'Filled from ' + file.name + '. Check the values, then save.' + note);
+  });
 
   async function waitForRestart() {
     // The server keeps the port and swaps what answers on it, so a request landing in
